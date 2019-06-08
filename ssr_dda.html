@@ -30,7 +30,7 @@
   </head>
   <body>
     <div id="info">
-      <a href="http://threejs.org" target="_blank">three.js</a> - SSR
+      <a href="http://threejs.org" target="_blank">three.js</a> - SSR(DDA)
     </div>
     
     <script src="js/three.min.js"></script>
@@ -73,7 +73,7 @@
           'shaders/copy_vert.glsl',
           'shaders/copy_frag.glsl',
           'shaders/depth_frag.glsl',
-          'shaders/ssr_frag.glsl',
+          'shaders/ssr_dda_frag.glsl',
           'shaders/ssrblur_frag.glsl',
           'shaders/ssrcomposite_frag.glsl',
           'shaders/pbr_vert.glsl',
@@ -380,6 +380,7 @@
           ColorSampler: { value: colorTarget.texture },
           NormalSampler: { value: normalTarget.texture },
           DepthSampler: { value: colorTarget.depthTexture },
+          BackDepthSampler: { value: colorTarget.depthTexture },
           MetalRoughSampler: { value: metalRoughTarget.texture },
           EnvSampler: { value: app.scene.background },
           Resolution: { value: new THREE.Vector4(app.canvas.width, app.canvas.height, 1.0/app.canvas.width, 1.0/app.canvas.height) },
@@ -387,19 +388,27 @@
           CameraFar: { value: app.camera.far },
           CameraProjectionMatrix: { value: new THREE.Matrix4() },
           CameraInverseProjectionMatrix: { value: new THREE.Matrix4() },
+          ViewInverseMatrix: { value: new THREE.Matrix4() },
           Iterations: { value: 50 },
           BinarySearchIterations: { value: 4 },
-          Thickness: { value: 1.0 },
+          PixelZSize: { value: 1.0 },
+          PixelStride: { value: 2.0 },
+          PixelStrideZCutoff: { value: 100.0 },
           MaxRayDistance: { value: 20.0 },
+          ScreenEdgeFadeStart: { value: 0.75 },
+          EyeFadeStart: { value: 0.0 },
+          EyeFadeEnd: { value: 1.0 },
           EdgeDistance: { value: 50.0 },// default 15.0
           EdgeExponent: { value: 1.0 },// default 0.25
           FadeDistance: { value: 10.0 },
-          FadeExponent: { value: 1.0 }},
+          FadeExponent: { value: 1.0 },
+          Jitter: { value: 0.0 }},
           app.shaders["copy_vert"],
-          app.shaders["ssr_frag"],
+          app.shaders["ssr_dda_frag"],
           { depthTest: false, depthWrite: false });
         ssrMaterial.uniforms.CameraProjectionMatrix.value.copy(app.camera.projectionMatrix);
         ssrMaterial.uniforms.CameraInverseProjectionMatrix.value.getInverse(app.camera.projectionMatrix);
+        ssrMaterial.uniforms.ViewInverseMatrix.value.getInverse(app.camera.matrixWorldInverse);
         var ssrPass = {
           enable: true,
           scene: new THREE.Scene(),
@@ -417,7 +426,7 @@
         app.ssrMaterial = ssrMaterial;
 
         // SSR BLUR
-        var downsampling = 2;
+        var downsampling = 1;
         var blurTarget = createRenderTarget(THREE.RGBAFormat);
         blurTarget.depthBuffer = false;
         blurMaterial = createMaterial({
@@ -569,12 +578,18 @@
         app.config = {
           Iterations: ssrUniforms.Iterations.value,
           BinarySearchIterations: ssrUniforms.BinarySearchIterations.value,
-          Thickness: ssrUniforms.Thickness.value,
+          PixelZSize: ssrUniforms.PixelZSize.value,
+          PixelStride: ssrUniforms.PixelStride.value,
+          PixelStrideZCutoff: ssrUniforms.PixelStrideZCutoff.value,
           MaxRayDistance: ssrUniforms.MaxRayDistance.value,
+          ScreenEdgeFadeStart: ssrUniforms.ScreenEdgeFadeStart.value,
+          EyeFadeStart: ssrUniforms.EyeFadeStart.value,
+          EyeFadeEnd: ssrUniforms.EyeFadeEnd.value,
           EdgeDistance: ssrUniforms.EdgeDistance.value,
           EdgeExponent: ssrUniforms.EdgeExponent.value,
           FadeDistance: ssrUniforms.FadeDistance.value,
           FadeExponent: ssrUniforms.FadeExponent.value,
+          Jitter: ssrUniforms.Jitter.value,
           Roughness: true
         };
 
@@ -583,12 +598,18 @@
         h = gui.addFolder("SSR");
         h.add(app.config, "Iterations", 1.0, 300.0, 1.0);
         h.add(app.config, "BinarySearchIterations", 0.0, 32.0, 1.0);
-        h.add(app.config, "Thickness", 0.0, 64.0, 0.01);
+        h.add(app.config, "PixelStride", 0.0, 64.0, 0.01);
+        h.add(app.config, "PixelStrideZCutoff", 0.0, 50.0, 1.0);
+        h.add(app.config, "PixelZSize", 0.0, 1.0, 0.01);
         h.add(app.config, "MaxRayDistance", 0.0, 100.0, 0.1);
+        // h.add(app.config, "ScreenEdgeFadeStart", 0.0, 1.0, 0.01);
+        // h.add(app.config, "EyeFadeStart", 0.0, 1.0, 0.01);
+        // h.add(app.config, "EyeFadeEnd", 0.0, 1.0, 0.01);
         h.add(app.config, "EdgeDistance", 0.0, 100.0, 0.01);
         h.add(app.config, "EdgeExponent", 0.01, 10.0, 0.01);
-        h.add(app.config, "FadeDistance", 0.0, 100.0, 0.01);
+        h.add(app.config, "FadeDistance", 0.0, 50.0, 0.01);
         h.add(app.config, "FadeExponent", 0.01, 10.0, 0.01);
+        h.add(app.config, "Jitter", 0.0, 1.0, 1.0);
         h.add(app.config, "Roughness");
       }
 
@@ -625,16 +646,23 @@
         app.camera.updateProjectionMatrix();
         app.ssrMaterial.uniforms.CameraProjectionMatrix.value.copy(app.camera.projectionMatrix);
         app.ssrMaterial.uniforms.CameraInverseProjectionMatrix.value.getInverse(app.camera.projectionMatrix);
+        app.ssrMaterial.uniforms.ViewInverseMatrix.value.getInverse(app.camera.matrixWorldInverse);
         // console.log(app.ssrMaterial.uniforms.CameraProjectionMatrix.value);
         // console.log(app.ssrMaterial.uniforms.CameraInverseProjectionMatrix.value);
         app.ssrMaterial.uniforms.Iterations.value = app.config.Iterations;
         app.ssrMaterial.uniforms.BinarySearchIterations.value = app.config.BinarySearchIterations;
-        app.ssrMaterial.uniforms.Thickness.value = app.config.Thickness;
+        app.ssrMaterial.uniforms.PixelZSize.value = app.config.PixelZSize;
+        app.ssrMaterial.uniforms.PixelStride.value = app.config.PixelStride;
+        app.ssrMaterial.uniforms.PixelStrideZCutoff.value = app.config.PixelStrideZCutoff;
         app.ssrMaterial.uniforms.MaxRayDistance.value = app.config.MaxRayDistance;
+        app.ssrMaterial.uniforms.ScreenEdgeFadeStart.value = app.config.ScreenEdgeFadeStart;
+        app.ssrMaterial.uniforms.EyeFadeStart.value = app.config.EyeFadeStart;
+        app.ssrMaterial.uniforms.EyeFadeEnd.value = app.config.EyeFadeEnd;
         app.ssrMaterial.uniforms.EdgeDistance.value = app.config.EdgeDistance;
         app.ssrMaterial.uniforms.EdgeExponent.value = app.config.EdgeExponent;
         app.ssrMaterial.uniforms.FadeDistance.value = app.config.FadeDistance;
         app.ssrMaterial.uniforms.FadeExponent.value = app.config.FadeExponent;
+        app.ssrMaterial.uniforms.Jitter.value = app.config.Jitter;
 
         if (app.config.Roughness) {
           app.groundMaterial.roughnessMap = app.roughnessMap;
