@@ -1,1 +1,1 @@
-# SSAO DEMO
+# SSR DEMO
